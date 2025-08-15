@@ -34,7 +34,8 @@
         <label class="btn" for="file">📁 Upload Gambar</label>
         <input id="file" type="file" accept="image/*" />
         <button id="processBtn" disabled>▶️ Proses & Quantize</button>
-        <button id="downloadBtn" disabled>💾 Download Hasil</button>
+        <button id="downloadBtn" disabled>💾 Download CSV</button>
+        <button id="copyBtn" disabled>📋 Copy CSV</button>
         <span class="pill">Klik kanvas untuk cek warna pada titik</span>
       </div>
       <div class="row" style="margin-top:8px; gap:16px;">
@@ -114,6 +115,7 @@
     const fileInput = document.getElementById('file');
     const processBtn = document.getElementById('processBtn');
     const downloadBtn = document.getElementById('downloadBtn');
+    const copyBtn = document.getElementById('copyBtn');
     const canvas = document.getElementById('canvas');
     const ctx = canvas.getContext('2d', { willReadFrequently: true });
     const showOriginal = document.getElementById('showOriginal');
@@ -124,6 +126,7 @@
 
     let originalImg = new Image();
     let hasImage = false;
+    let csvLines = null; // will store CSV lines after processing
 
     // Populate palette UI
     (function renderPalette(){
@@ -154,22 +157,57 @@
         hasImage = true;
         processBtn.disabled = false;
         downloadBtn.disabled = true;
+        copyBtn.disabled = true;
+        csvLines = null;
       };
       originalImg.src = url;
     });
 
-    processBtn.addEventListener('click', ()=>{
+    processBtn.addEventListener('click', async ()=>{
       if (!hasImage) return;
-      if (showOriginal.checked) ctx.drawImage(originalImg, 0, 0);
-      quantizeToPalette();
-      downloadBtn.disabled = false;
+      processBtn.disabled = true;
+      try{
+        if (showOriginal.checked) ctx.drawImage(originalImg, 0, 0);
+        await quantizeToPalette();
+        downloadBtn.disabled = false;
+        copyBtn.disabled = false;
+      }finally{
+        processBtn.disabled = false;
+      }
     });
 
+    // Download CSV of x,y,name
     downloadBtn.addEventListener('click', ()=>{
+      if (!csvLines) return;
+      const csvContent = 'x,y,color
+' + csvLines.join('
+');
+      const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+      const url = URL.createObjectURL(blob);
       const a = document.createElement('a');
-      a.href = canvas.toDataURL('image/png');
-      a.download = 'quantized.png';
+      a.href = url;
+      a.download = 'quantized_pixels.csv';
+      document.body.appendChild(a);
       a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+    });
+
+    // Copy CSV to clipboard
+    copyBtn.addEventListener('click', async ()=>{
+      if (!csvLines) return;
+      const csvContent = 'x,y,color
+' + csvLines.join('
+');
+      try{
+        await navigator.clipboard.writeText(csvContent);
+        alert('CSV copied to clipboard');
+      }catch(e){
+        // fallback: open in new window to let user copy
+        const w = window.open();
+        w.document.write('<pre>'+escapeHtml(csvContent)+'</pre>');
+        w.document.title = 'CSV - copy manually';
+      }
     });
 
     // Click to probe a pixel
@@ -186,18 +224,30 @@
     });
 
     // Core quantization
-    function quantizeToPalette(){
-      const img = ctx.getImageData(0, 0, canvas.width, canvas.height);
+    async function quantizeToPalette(){
+      const width = canvas.width;
+      const height = canvas.height;
+      const img = ctx.getImageData(0, 0, width, height);
       const data = img.data;
       // Precompute palette array for speed
       const entries = Object.entries(COLOR_LIST).map(([name, rgb])=>({name, rgb}));
 
-      for (let i=0; i<data.length; i+=4){
+      const lines = new Array((width * height));
+      let li = 0;
+
+      for (let i=0, px=0; i<data.length; i+=4, px++){
         const r = data[i], g = data[i+1], b = data[i+2];
-        const { rgb } = nearestColor(r,g,b, entries);
-        data[i] = rgb[0]; data[i+1] = rgb[1]; data[i+2] = rgb[2]; // keep alpha
+        const { name, rgb } = nearestColor(r,g,b, entries);
+        data[i] = rgb[0]; data[i+1] = rgb[1]; data[i+2] = rgb[2]; // set quantized pixel
+        const x = px % width;
+        const y = Math.floor(px / width);
+        lines[li++] = `${x},${y},${name}`;
+        // allow UI to breathe on huge images
+        if (px % 500000 === 0) await new Promise(r=>setTimeout(r,0));
       }
+
       ctx.putImageData(img, 0, 0);
+      csvLines = lines.slice(0, li);
     }
 
     // Nearest color with two distance options
@@ -237,6 +287,10 @@
         const s = v.toString(16).padStart(2,'0');
         return s;
       }).join('');
+    }
+
+    function escapeHtml(text){
+      return text.replace(/[&<>]/g, (c)=>({ '&':'&amp;','<':'&lt;','>':'&gt;' }[c] || c));
     }
   </script>
 </body>
