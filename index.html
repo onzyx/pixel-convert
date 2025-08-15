@@ -15,13 +15,15 @@
     button { padding:10px 14px; border:1px solid #2b3343; border-radius:12px; background:#1a2130; color:#e5e7eb; cursor:pointer; }
     button:hover{ background:#20293a; }
     .pill { padding:6px 10px; border:1px solid #2b3343; border-radius:999px; background:#111625; }
-    canvas { max-width:100%; height:auto; image-rendering: pixelated; background:#0b0f17; border:1px solid #232a3a; border-radius:12px; }
+    canvas { max-width:100%; height:auto; image-rendering: pixelated; background:#0b0f17; border:1px solid #232a3a; border-radius:12px; display:block; }
     .grid { display:grid; grid-template-columns: repeat(auto-fill, minmax(120px,1fr)); gap:8px; }
     .swatch { display:flex; align-items:center; gap:8px; border:1px solid #2b3343; border-radius:12px; padding:8px; background:#0f1422; }
     .box { width:28px; height:28px; border-radius:8px; border:1px solid #2b3343; }
     .muted{ color:#9aa4b2; font-size:12px; }
     .kbd{ font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace; background:#0e1422; border:1px solid #2b3343; padding:2px 6px; border-radius:6px; }
     details { border:1px dashed #2b3343; border-radius:12px; padding:8px 12px; }
+    .status { margin-top:8px; color:#cbd5e1; font-size:13px; }
+    .dropzone { border:2px dashed #2b3343; border-radius:12px; padding:12px; text-align:center; background:#0d1116; cursor:pointer; }
   </style>
 </head>
 <body>
@@ -31,8 +33,9 @@
 
     <div class="card" style="margin-bottom:16px;">
       <div class="row">
-        <label class="btn" for="file">📁 Upload Gambar</label>
+        <label class="btn" for="file" id="labelFile">📁 Upload Gambar</label>
         <input id="file" type="file" accept="image/*" />
+        <button id="pickBtn">📂 Pilih Gambar</button>
         <button id="processBtn" disabled>▶️ Proses & Quantize</button>
         <button id="downloadBtn" disabled>💾 Download CSV</button>
         <button id="copyBtn" disabled>📋 Copy CSV</button>
@@ -40,12 +43,15 @@
       </div>
       <div class="row" style="margin-top:8px; gap:16px;">
         <label><input type="checkbox" id="showOriginal" checked> Tampilkan gambar asli saat belum diproses</label>
+        <label><input type="checkbox" id="autoProcess"> Proses otomatis setelah upload</label>
         <label><input type="checkbox" id="fastMode" checked> Mode cepat (jarak Euclidean RGB)</label>
       </div>
+      <div class="status" id="status">Status: menunggu file</div>
     </div>
 
     <div class="row" style="align-items:flex-start;">
       <div style="flex:2; min-width:280px;">
+        <div class="dropzone" id="dropzone">Tarik & lepas gambar di sini, atau klik "Pilih Gambar"</div>
         <canvas id="canvas" width="0" height="0"></canvas>
       </div>
       <div style="flex:1; min-width:260px;">
@@ -113,20 +119,28 @@
     };
 
     const fileInput = document.getElementById('file');
+    const pickBtn = document.getElementById('pickBtn');
     const processBtn = document.getElementById('processBtn');
     const downloadBtn = document.getElementById('downloadBtn');
     const copyBtn = document.getElementById('copyBtn');
     const canvas = document.getElementById('canvas');
     const ctx = canvas.getContext('2d', { willReadFrequently: true });
     const showOriginal = document.getElementById('showOriginal');
+    const autoProcess = document.getElementById('autoProcess');
     const fastMode = document.getElementById('fastMode');
     const pointInfo = document.getElementById('pointInfo');
     const colorInfo = document.getElementById('colorInfo');
     const swatchBox = document.getElementById('swatchBox');
+    const statusEl = document.getElementById('status');
+    const dropzone = document.getElementById('dropzone');
 
     let originalImg = new Image();
     let hasImage = false;
     let csvLines = null; // will store CSV lines after processing
+
+    // Make sure clicking visible controls triggers file input (some mobile browsers)
+    document.getElementById('labelFile').addEventListener('click', ()=>fileInput.click());
+    pickBtn.addEventListener('click', ()=>fileInput.click());
 
     // Populate palette UI
     (function renderPalette(){
@@ -146,31 +160,90 @@
       palEl.appendChild(frag);
     })();
 
+    // Drag & drop support
+    dropzone.addEventListener('dragover', (e)=>{ e.preventDefault(); dropzone.style.opacity = 0.8; });
+    dropzone.addEventListener('dragleave', ()=>{ dropzone.style.opacity = 1; });
+    dropzone.addEventListener('drop', (e)=>{
+      e.preventDefault(); dropzone.style.opacity = 1;
+      const f = e.dataTransfer.files?.[0];
+      if (f) handleFile(f);
+    });
+
     fileInput.addEventListener('change', (e)=>{
       const f = e.target.files?.[0];
       if (!f) return;
-      const url = URL.createObjectURL(f);
-      originalImg.onload = ()=>{
-        canvas.width = originalImg.width;
-        canvas.height = originalImg.height;
-        ctx.drawImage(originalImg, 0, 0);
-        hasImage = true;
-        processBtn.disabled = false;
-        downloadBtn.disabled = true;
-        copyBtn.disabled = true;
-        csvLines = null;
-      };
-      originalImg.src = url;
+      handleFile(f);
     });
+
+    function handleFile(f){
+      statusEl.textContent = `Status: memuat ${f.name} ...`;
+      csvLines = null; downloadBtn.disabled = true; copyBtn.disabled = true; processBtn.disabled = true;
+      // try URL.createObjectURL first
+      try{
+        const url = URL.createObjectURL(f);
+        originalImg = new Image();
+        originalImg.onload = ()=>{
+          cleanupObjectURL(url);
+          onImageLoaded();
+        };
+        originalImg.onerror = async ()=>{
+          console.warn('createObjectURL failed, falling back to FileReader');
+          // fallback to FileReader
+          try{
+            const dataUrl = await readFileAsDataURL(f);
+            originalImg.src = dataUrl;
+          }catch(err){
+            statusEl.textContent = 'Status: gagal memuat gambar (FileReader juga gagal)';
+            console.error(err);
+          }
+        };
+        // set src after handlers
+        originalImg.src = url;
+      }catch(err){
+        // some browsers may throw; fallback to FileReader
+        readFileAsDataURL(f).then(dataUrl=>{
+          originalImg = new Image();
+          originalImg.onload = onImageLoaded;
+          originalImg.onerror = ()=>{ statusEl.textContent = 'Status: gagal memuat gambar'; };
+          originalImg.src = dataUrl;
+        }).catch(e=>{
+          statusEl.textContent = 'Status: gagal memuat gambar';
+          console.error(e);
+        });
+      }
+    }
+
+    function cleanupObjectURL(url){ try{ URL.revokeObjectURL(url); }catch(e){} }
+    function readFileAsDataURL(file){ return new Promise((res, rej)=>{ const fr = new FileReader(); fr.onload = ()=>res(fr.result); fr.onerror = ()=>rej(fr.error); fr.readAsDataURL(file); }); }
+
+    function onImageLoaded(){
+      // draw image
+      canvas.width = originalImg.width;
+      canvas.height = originalImg.height;
+      ctx.clearRect(0,0,canvas.width,canvas.height);
+      ctx.drawImage(originalImg, 0, 0);
+      hasImage = true;
+      processBtn.disabled = false;
+      statusEl.textContent = `Status: gambar ter-load (${canvas.width}×${canvas.height})`;
+      // auto process if checked
+      if (autoProcess.checked){
+        processBtn.click();
+      }
+    }
 
     processBtn.addEventListener('click', async ()=>{
       if (!hasImage) return;
       processBtn.disabled = true;
+      statusEl.textContent = 'Status: memproses... (harap tunggu)';
       try{
         if (showOriginal.checked) ctx.drawImage(originalImg, 0, 0);
         await quantizeToPalette();
         downloadBtn.disabled = false;
         copyBtn.disabled = false;
+        statusEl.textContent = `Status: selesai. ${csvLines.length} titik diproses.`;
+      }catch(e){
+        console.error(e);
+        statusEl.textContent = 'Status: terjadi error saat memproses gambar (lihat console)';
       }finally{
         processBtn.disabled = false;
       }
@@ -179,9 +252,7 @@
     // Download CSV of x,y,name
     downloadBtn.addEventListener('click', ()=>{
       if (!csvLines) return;
-      const csvContent = 'x,y,color
-' + csvLines.join('
-');
+      const csvContent = 'x,y,color\n' + csvLines.join('\n');
       const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
       const url = URL.createObjectURL(blob);
       const a = document.createElement('a');
@@ -196,12 +267,10 @@
     // Copy CSV to clipboard
     copyBtn.addEventListener('click', async ()=>{
       if (!csvLines) return;
-      const csvContent = 'x,y,color
-' + csvLines.join('
-');
+      const csvContent = 'x,y,color\n' + csvLines.join('\n');
       try{
         await navigator.clipboard.writeText(csvContent);
-        alert('CSV copied to clipboard');
+        statusEl.textContent = 'Status: CSV copied to clipboard';
       }catch(e){
         // fallback: open in new window to let user copy
         const w = window.open();
